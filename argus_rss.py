@@ -10,12 +10,30 @@ URL = "https://www.argusmedia.com/en/news-and-insights/latest-market-news?filter
 # ---------------------------
 async def scrape():
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox"]
+        )
 
-        await page.goto(URL, wait_until="networkidle")
-        await page.wait_for_selector(".qa-news-item")
+        page = await browser.new_page(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+        )
 
+        # FIX: Avoid networkidle (causes timeout)
+        await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+
+        # Give JS time to render
+        await page.wait_for_timeout(5000)
+
+        # Wait for articles
+        try:
+            await page.wait_for_selector(".qa-news-item", timeout=15000)
+        except:
+            print("No items found on page")
+            await browser.close()
+            return []
+
+        # Extract data
         items = await page.evaluate("""
         () => {
             return Array.from(document.querySelectorAll('.qa-news-item')).map(el => ({
@@ -28,6 +46,8 @@ async def scrape():
         """)
 
         await browser.close()
+
+        print(f"Scraped {len(items)} items")
         return items
 
 
@@ -42,21 +62,20 @@ def generate_rss(items):
 
     for item in items:
         if not item["title"] or not item["link"]:
-            continue  # skip invalid items
+            continue
 
         fe = fg.add_entry()
         fe.title(item["title"])
         fe.link(href=item["link"])
         fe.description(item["desc"])
 
-        # Date handling
         if item["date"]:
             try:
                 dt = datetime.strptime(item["date"], "%d/%m/%y")
                 dt = dt.replace(tzinfo=timezone.utc)
                 fe.pubDate(dt)
-            except Exception:
-                pass  # skip bad date formats safely
+            except:
+                pass
 
     fg.rss_file("feed.xml")
     print("RSS feed generated: feed.xml")
@@ -67,4 +86,8 @@ def generate_rss(items):
 # ---------------------------
 if __name__ == "__main__":
     items = asyncio.run(scrape())
-    generate_rss(items)
+
+    if not items:
+        print("No data scraped. Skipping RSS generation.")
+    else:
+        generate_rss(items)
